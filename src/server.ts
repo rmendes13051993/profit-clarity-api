@@ -24,6 +24,7 @@ type AuthedRequest = FastifyRequest & { user?: { id: string } };
 
 async function requireUser(request: AuthedRequest, reply: FastifyReply) {
   const auth = request.headers.authorization;
+
   if (!auth?.startsWith("Bearer ")) {
     return reply.code(401).send({ error: "Missing Bearer token" });
   }
@@ -49,13 +50,19 @@ app.post("/v1/auth/login", async (request: FastifyRequest, reply: FastifyReply) 
 
   const parsed = schema.safeParse(request.body);
   if (!parsed.success) {
-    return reply.code(400).send({ error: "Invalid body", details: parsed.error.flatten() });
+    return reply.code(400).send({
+      error: "Invalid body",
+      details: parsed.error.flatten(),
+    });
   }
 
   const { email, password } = parsed.data;
 
-  // 🔥 usa o Auth do Supabase pra devolver access_token pro front
-  const { data, error } = await supabaseAdmin.auth.signInWithPassword({ email, password });
+  // usa o Auth do Supabase pra devolver access_token pro front
+  const { data, error } = await supabaseAdmin.auth.signInWithPassword({
+    email,
+    password,
+  });
 
   if (error || !data.session) {
     return reply.code(401).send({ error: "Invalid login credentials" });
@@ -67,6 +74,31 @@ app.post("/v1/auth/login", async (request: FastifyRequest, reply: FastifyReply) 
     user: { id: data.user?.id, email: data.user?.email },
   };
 });
+
+// ✅ ESSA ROTA MATA O 404 DO FRONT (auth/me)
+app.get(
+  "/v1/auth/me",
+  { preHandler: requireUser },
+  async (request: AuthedRequest, reply: FastifyReply) => {
+    const userId = request.user!.id;
+
+    // (opcional) pegar email do user via token novamente
+    const auth = request.headers.authorization!;
+    const token = auth.slice("Bearer ".length);
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+
+    if (error || !data?.user) {
+      return reply.code(401).send({ error: "Invalid token" });
+    }
+
+    return {
+      user: {
+        id: userId,
+        email: data.user.email,
+      },
+    };
+  }
+);
 
 app.get(
   "/v1/analyses",
