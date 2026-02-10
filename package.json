@@ -1,16 +1,12 @@
 {
   "name": "profit-clarity-api",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@supabase/supabase-js": "^2.95.3",
