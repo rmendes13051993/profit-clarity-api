@@ -39,11 +39,17 @@ async function requireUser(request: AuthedRequest, reply: FastifyReply) {
 }
 
 // ===== Routes =====
+app.get("/", async () => ({
+  ok: true,
+  service: "profit-clarity-api",
+}));
+
 app.get("/v1/health", async () => ({ ok: true }));
 
-/**
- * LOGIN: devolve access_token pro front
- */
+app.get("/v1/auth/me", { preHandler: requireUser }, async (request: AuthedRequest) => {
+  return { user: request.user };
+});
+
 app.post("/v1/auth/login", async (request: FastifyRequest, reply: FastifyReply) => {
   const schema = z.object({
     email: z.string().email(),
@@ -70,90 +76,72 @@ app.post("/v1/auth/login", async (request: FastifyRequest, reply: FastifyReply) 
   };
 });
 
-/**
- * ME: valida token e devolve user básico
- */
-app.get("/v1/auth/me", { preHandler: requireUser }, async (request: AuthedRequest) => {
-  return { user: request.user };
-});
+// ✅ CADASTRO (signup) - rota principal
+app.post("/v1/auth/signup", async (request: FastifyRequest, reply: FastifyReply) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    // se teu form manda mais coisas, a gente guarda no metadata
+    name: z.string().min(1).optional(),
+    phone: z.string().min(8).optional(),
+    city: z.string().optional(),
+    uf: z.string().optional(),
+  });
 
-/**
- * SIGNUP / REGISTER: cria usuário e já faz login pra devolver token
- * (aceita campos extras do seu formulário sem quebrar)
- */
-const signupSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(6),
-
-  // extras opcionais vindos do seu formulário
-  full_name: z.string().optional(),
-  name: z.string().optional(),
-  phone: z.string().optional(),
-  cep: z.string().optional(),
-  street: z.string().optional(),
-  number: z.string().optional(),
-  complement: z.string().optional(),
-  neighborhood: z.string().optional(),
-  city: z.string().optional(),
-  uf: z.string().optional(),
-});
-
-async function handleSignup(request: FastifyRequest, reply: FastifyReply) {
-  const parsed = signupSchema.safeParse(request.body);
+  const parsed = schema.safeParse(request.body);
   if (!parsed.success) {
     return reply.code(400).send({ error: "Invalid body", details: parsed.error.flatten() });
   }
 
-  const body = parsed.data;
-  const email = body.email;
-  const password = body.password;
+  const { email, password, ...rest } = parsed.data;
 
-  // cria user no Supabase usando Service Role (admin)
-  const { data: created, error: createError } = await supabaseAdmin.auth.admin.createUser({
+  // 1) Cria usuário via Admin
+  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
-    email_confirm: true, // evita depender de confirmação de e-mail agora
-    user_metadata: {
-      full_name: body.full_name ?? body.name ?? null,
-      phone: body.phone ?? null,
-      address: {
-        cep: body.cep ?? null,
-        street: body.street ?? null,
-        number: body.number ?? null,
-        complement: body.complement ?? null,
-        neighborhood: body.neighborhood ?? null,
-        city: body.city ?? null,
-        uf: body.uf ?? null,
-      },
-    },
+    email_confirm: true, // 👈 deixa entrar direto na homolog (se quiser exigir email, troca pra false)
+    user_metadata: rest,
   });
 
-  if (createError || !created?.user) {
-    return reply.code(400).send({ error: createError?.message ?? "Could not create user" });
+  if (createErr) {
+    // email já existe, etc.
+    return reply.code(400).send({ error: createErr.message });
   }
 
-  // já faz login pra devolver token pro front
-  const { data: sessionData, error: signInError } =
-    await supabaseAdmin.auth.signInWithPassword({ email, password });
+  // 2) Auto-login (gera access_token pro front)
+  const { data: sessionData, error: loginErr } = await supabaseAdmin.auth.signInWithPassword({
+    email,
+    password,
+  });
 
-  if (signInError || !sessionData.session) {
-    return reply.code(500).send({
-      error: "User created but could not start session",
-      details: signInError?.message,
+  if (loginErr || !sessionData.session) {
+    // Usuário criado mas login falhou (raro). Devolve user e pede login manual.
+    return reply.code(201).send({
+      user: { id: created.user?.id, email: created.user?.email },
+      warning: "User created but auto-login failed. Please login.",
     });
   }
 
-  return {
+  return reply.code(201).send({
     access_token: sessionData.session.access_token,
     refresh_token: sessionData.session.refresh_token,
     user: { id: sessionData.user?.id, email: sessionData.user?.email },
-  };
-}
+  });
+});
 
-app.post("/v1/auth/signup", handleSignup);
-app.post("/v1/auth/register", handleSignup);
+// ✅ ALIAS (caso teu front use /register)
+app.post("/v1/auth/register", async (request: FastifyRequest, reply: FastifyReply) => {
+  // reusa exatamente a mesma lógica do signup
+  return app.inject({
+    method: "POST",
+    url: "/v1/auth/signup",
+    payload: request.body as any,
+    headers: request.headers as any,
+  }).then((res) => {
+    reply.code(res.statusCode).headers(res.headers).send(res.json());
+  });
+});
 
-// ===== Analyses =====
 app.get("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequest, reply: FastifyReply) => {
   const userId = request.user!.id;
 
@@ -183,6 +171,7 @@ app.post("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequ
   const userId = request.user!.id;
   const body = parsed.data;
 
+  const analysisJson = JSON.stringify(body.analysis_data ?? {});
   const { data, error } = await supabaseAdmin
     .from("user_analyses")
     .insert({
@@ -191,7 +180,7 @@ app.post("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequ
       file_name: body.file_name,
       analysis_data: body.analysis_data ?? null,
       summary: body.summary ?? null,
-      data_size_bytes: JSON.stringify(body.analysis_data ?? {}).length,
+      data_size_bytes: analysisJson.length,
     })
     .select("*")
     .single();
