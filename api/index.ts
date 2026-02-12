@@ -52,7 +52,7 @@ async function buildApp() {
       cb(null, allowed.some((re) => re.test(origin)));
     },
     credentials: true,
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   });
 
@@ -64,6 +64,7 @@ async function buildApp() {
     return { user: request.user };
   });
 
+  // ===== Login =====
   app.post("/v1/auth/login", async (request: any, reply: any) => {
     const schema = z.object({
       email: z.string().email(),
@@ -90,15 +91,25 @@ async function buildApp() {
     };
   });
 
-  // Signup
+  // ===== Signup =====
   app.post("/v1/auth/signup", async (request: any, reply: any) => {
     const schema = z.object({
       email: z.string().email(),
       password: z.string().min(6),
-      name: z.string().min(1).optional(),
-      phone: z.string().min(8).optional(),
+      // Metadata flexível - aceita qualquer campo extra do formulário
+      name: z.string().optional(),
+      full_name: z.string().optional(),
+      phone: z.string().optional(),
+      phone_e164: z.string().optional(),
       city: z.string().optional(),
       uf: z.string().optional(),
+      cep: z.string().optional(),
+      address_street: z.string().optional(),
+      address_number: z.string().optional(),
+      address_complement: z.string().nullable().optional(),
+      address_neighborhood: z.string().nullable().optional(),
+      address_city: z.string().optional(),
+      address_state: z.string().optional(),
     });
 
     const parsed = schema.safeParse(request.body);
@@ -138,9 +149,8 @@ async function buildApp() {
     });
   });
 
-  // ✅ Register alias (sem gambiarra)
+  // ===== Register alias =====
   app.post("/v1/auth/register", async (request: any, reply: any) => {
-    // chama a mesma lógica: simplesmente repete o handler usando inject
     const res = await app.inject({
       method: "POST",
       url: "/v1/auth/signup",
@@ -151,6 +161,55 @@ async function buildApp() {
     reply.code(res.statusCode).headers(res.headers).send(res.json());
   });
 
+  // ===== Busca custos de produtos por SKU (usa service role, ignora RLS) =====
+  app.post("/v1/products/costs", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
+    const schema = z.object({
+      skus: z.array(z.string()).min(1).max(5000),
+    });
+
+    const parsed = schema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid body", details: parsed.error.flatten() });
+    }
+
+    const { skus } = parsed.data;
+
+    // Supabase tem limite de ~1000 items no .in(), então dividimos em chunks
+    const CHUNK_SIZE = 500;
+    let allProducts: any[] = [];
+
+    for (let i = 0; i < skus.length; i += CHUNK_SIZE) {
+      const chunk = skus.slice(i, i + CHUNK_SIZE);
+
+      const { data, error } = await supabaseAdmin
+        .from("wedrop_products2")
+        .select("SKU, Produto, preco_custo_num, preco_custo_impostos_num, preco_venda_num, Multiplicador_flex")
+        .in("SKU", chunk);
+
+      if (error) {
+        // Se der erro na coluna Multiplicador_flex, tenta sem ela
+        if (error.message?.includes("Multiplicador_flex")) {
+          const fallback = await supabaseAdmin
+            .from("wedrop_products2")
+            .select("SKU, Produto, preco_custo_num, preco_custo_impostos_num, preco_venda_num")
+            .in("SKU", chunk);
+
+          if (fallback.error) {
+            return reply.code(500).send({ error: fallback.error.message });
+          }
+          allProducts = allProducts.concat(fallback.data || []);
+          continue;
+        }
+        return reply.code(500).send({ error: error.message });
+      }
+
+      allProducts = allProducts.concat(data || []);
+    }
+
+    return { data: allProducts };
+  });
+
+  // ===== Listar análises =====
   app.get("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
     const userId = request.user!.id;
 
@@ -164,6 +223,7 @@ async function buildApp() {
     return { data };
   });
 
+  // ===== Criar análise =====
   app.post("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
     const schema = z.object({
       marketplace: z.string().min(1),
@@ -196,6 +256,46 @@ async function buildApp() {
 
     if (error) return reply.code(500).send({ error: error.message });
     return { data };
+  });
+
+  // ===== Buscar análise por ID =====
+  app.get("/v1/analyses/:id", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.id;
+
+    const { data, error } = await supabaseAdmin
+      .from("user_analyses")
+      .select("*")
+      .eq("id", id)
+      .eq("user_id", userId)
+      .single();
+
+    if (error) {
+      if (error.code === "PGRST116") {
+        return reply.code(404).send({ error: "Análise não encontrada" });
+      }
+      return reply.code(500).send({ error: error.message });
+    }
+
+    return { data };
+  });
+
+  // ===== Deletar análise por ID =====
+  app.delete("/v1/analyses/:id", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
+    const { id } = request.params as { id: string };
+    const userId = request.user!.id;
+
+    const { error } = await supabaseAdmin
+      .from("user_analyses")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      return reply.code(500).send({ error: error.message });
+    }
+
+    return reply.code(204).send();
   });
 
   await app.ready();
