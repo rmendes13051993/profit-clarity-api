@@ -39,11 +39,7 @@ async function requireUser(request: AuthedRequest, reply: FastifyReply) {
 }
 
 // ===== Routes =====
-app.get("/", async () => ({
-  ok: true,
-  service: "profit-clarity-api",
-}));
-
+app.get("/", async () => ({ ok: true, service: "profit-clarity-api" }));
 app.get("/v1/health", async () => ({ ok: true }));
 
 app.get("/v1/auth/me", { preHandler: requireUser }, async (request: AuthedRequest) => {
@@ -76,12 +72,11 @@ app.post("/v1/auth/login", async (request: FastifyRequest, reply: FastifyReply) 
   };
 });
 
-// ✅ CADASTRO (signup) - rota principal
+// ✅ CADASTRO (signup)
 app.post("/v1/auth/signup", async (request: FastifyRequest, reply: FastifyReply) => {
   const schema = z.object({
     email: z.string().email(),
     password: z.string().min(6),
-    // se teu form manda mais coisas, a gente guarda no metadata
     name: z.string().min(1).optional(),
     phone: z.string().min(8).optional(),
     city: z.string().optional(),
@@ -95,27 +90,23 @@ app.post("/v1/auth/signup", async (request: FastifyRequest, reply: FastifyReply)
 
   const { email, password, ...rest } = parsed.data;
 
-  // 1) Cria usuário via Admin
   const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
-    email_confirm: true, // 👈 deixa entrar direto na homolog (se quiser exigir email, troca pra false)
+    email_confirm: true,
     user_metadata: rest,
   });
 
   if (createErr) {
-    // email já existe, etc.
     return reply.code(400).send({ error: createErr.message });
   }
 
-  // 2) Auto-login (gera access_token pro front)
   const { data: sessionData, error: loginErr } = await supabaseAdmin.auth.signInWithPassword({
     email,
     password,
   });
 
   if (loginErr || !sessionData.session) {
-    // Usuário criado mas login falhou (raro). Devolve user e pede login manual.
     return reply.code(201).send({
       user: { id: created.user?.id, email: created.user?.email },
       warning: "User created but auto-login failed. Please login.",
@@ -129,17 +120,16 @@ app.post("/v1/auth/signup", async (request: FastifyRequest, reply: FastifyReply)
   });
 });
 
-// ✅ ALIAS (caso teu front use /register)
+// ✅ ALIAS /register
 app.post("/v1/auth/register", async (request: FastifyRequest, reply: FastifyReply) => {
-  // reusa exatamente a mesma lógica do signup
-  return app.inject({
+  const res = await app.inject({
     method: "POST",
     url: "/v1/auth/signup",
     payload: request.body as any,
     headers: request.headers as any,
-  }).then((res) => {
-    reply.code(res.statusCode).headers(res.headers).send(res.json());
   });
+
+  reply.code(res.statusCode).headers(res.headers).send(res.json());
 });
 
 app.get("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequest, reply: FastifyReply) => {
@@ -201,14 +191,18 @@ async function main() {
         /^https:\/\/(.*\.)?wcontrol\.app\.br$/,
       ];
 
-      const ok = allowed.some((re) => re.test(origin));
-      cb(null, ok);
+      cb(null, allowed.some((re) => re.test(origin)));
     },
     credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   });
 
+  // preflight (ajuda muito quando browser inventa moda)
+  app.options("*", async (_req, reply) => reply.code(204).send());
+
   await app.listen({ port: PORT, host: "0.0.0.0" });
-  app.log.info(`🚀 API rodando em http://localhost:${PORT}`);
+  app.log.info(`🚀 API local rodando em http://localhost:${PORT}`);
 }
 
 main().catch((err) => {

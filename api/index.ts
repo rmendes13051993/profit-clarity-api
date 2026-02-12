@@ -41,7 +41,6 @@ async function buildApp() {
   // ===== CORS =====
   await app.register(cors, {
     origin: (origin, cb) => {
-      // permite chamadas server-to-server e algumas situações sem origin
       if (!origin) return cb(null, true);
 
       const allowed = [
@@ -139,11 +138,17 @@ async function buildApp() {
     });
   });
 
-  // Register alias (sem inject — mais limpo)
+  // ✅ Register alias (sem gambiarra)
   app.post("/v1/auth/register", async (request: any, reply: any) => {
-    // chama a mesma função do signup reaproveitando via request interno simples
-    request.url = "/v1/auth/signup";
-    return app.routing(request, reply);
+    // chama a mesma lógica: simplesmente repete o handler usando inject
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/auth/signup",
+      payload: request.body,
+      headers: request.headers,
+    });
+
+    reply.code(res.statusCode).headers(res.headers).send(res.json());
   });
 
   app.get("/v1/analyses", { preHandler: requireUser }, async (request: AuthedRequest, reply: any) => {
@@ -199,5 +204,23 @@ async function buildApp() {
 
 export default async function handler(req: any, res: any) {
   if (!cachedApp) cachedApp = await buildApp();
-  cachedApp.server.emit("request", req, res);
+
+  // Vercel manda req.url com "/api/..." — precisamos cortar o "/api"
+  const rawUrl = req.url || "/";
+  const url = rawUrl.startsWith("/api") ? rawUrl.slice(4) || "/" : rawUrl;
+
+  const result = await cachedApp.inject({
+    method: req.method,
+    url,
+    headers: req.headers,
+    payload: req.body,
+  });
+
+  res.statusCode = result.statusCode;
+
+  for (const [key, value] of Object.entries(result.headers || {})) {
+    if (value !== undefined) res.setHeader(key, String(value));
+  }
+
+  res.end(result.payload);
 }
